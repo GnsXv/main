@@ -1,0 +1,844 @@
+repeat task.wait() until game:IsLoaded()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TS = game:GetService("TweenService")
+local HS = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LP = Players.LocalPlayer
+
+local Steal = {
+    AutoStealEnabled = false,
+    StealRadius = 61,
+    StealDuration = 1.3,
+    StealDelay = 0.25,
+    Data = {}
+}
+
+local isStealing = false
+local isRagdolled = false
+local isMedusa = false
+local autoGrabSetDelayRadius = 9
+
+local Conns = { autoSteal = nil, statusUpdater = nil }
+
+local progressFill = nil
+local progressPct = nil
+local progressRadLbl = nil
+local mainFrame = nil
+
+local C = {
+    Panel      = Color3.fromRGB(18, 18, 20),
+    PanelStroke= Color3.fromRGB(70, 70, 75),
+    Purple     = Color3.fromRGB(150, 100, 250),
+    White      = Color3.fromRGB(255, 255, 255),
+    BtnDark    = Color3.fromRGB(32, 32, 36),
+    BarBg      = Color3.fromRGB(28, 28, 32),
+    GreyText   = Color3.fromRGB(190, 190, 195),
+    Orange     = Color3.fromRGB(235, 160, 60),
+    OffGrey    = Color3.fromRGB(60, 60, 66),
+}
+
+local Settings = {
+    Radius = 61,
+    Mode = 75,
+    IsLocked = true,
+    Position = nil,
+    AutoStealEnabled = false,
+    RagdollStealEnabled = false,
+    MedusaStealEnabled = false,
+}
+
+local function loadSettings()
+    local data = nil
+    if readfile and isfile and isfile("ScarletSettings.json") then
+        local content = readfile("ScarletSettings.json")
+        if content and content ~= "" then
+            data = HS:JSONDecode(content)
+        end
+    elseif _G.ScarletSettings then
+        data = _G.ScarletSettings
+    end
+
+    if data then
+        Settings.Radius = data.radius or 61
+        Settings.Mode = data.mode or 75
+        Settings.IsLocked = data.isLocked ~= false
+        Settings.Position = data.position
+        Settings.AutoStealEnabled = data.autoStealEnabled or false
+        Settings.RagdollStealEnabled = data.ragdollStealEnabled or false
+        Settings.MedusaStealEnabled = data.medusaStealEnabled or false
+    else
+        Settings.Radius = 61
+        Settings.Mode = 75
+        Settings.IsLocked = true
+        Settings.Position = nil
+        Settings.AutoStealEnabled = false
+        Settings.RagdollStealEnabled = false
+        Settings.MedusaStealEnabled = false
+    end
+end
+
+local function saveSettings()
+    local pos = mainFrame and mainFrame.Position or nil
+    local data = {
+        radius = Settings.Radius,
+        mode = Settings.Mode,
+        isLocked = Settings.IsLocked,
+        position = pos and {
+            X = pos.X.Scale,
+            XOffset = pos.X.Offset,
+            Y = pos.Y.Scale,
+            YOffset = pos.Y.Offset
+        } or nil,
+        autoStealEnabled = Settings.AutoStealEnabled,
+        ragdollStealEnabled = Settings.RagdollStealEnabled,
+        medusaStealEnabled = Settings.MedusaStealEnabled,
+    }
+    local json = HS:JSONEncode(data)
+    if writefile then
+        writefile("ScarletSettings.json", json)
+    else
+        _G.ScarletSettings = data
+    end
+end
+
+loadSettings()
+Steal.StealRadius = Settings.Radius
+Steal.AutoStealEnabled = Settings.AutoStealEnabled
+
+local function getStopTimeFromMode()
+    local mode = Settings.Mode or 0
+    if mode == 0 then return nil end
+    return (mode / 100) * Steal.StealDuration
+end
+
+local function isMyPlotByName(plotName)
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return false end
+    local plot = plots:FindFirstChild(plotName)
+    if not plot then return false end
+    local sign = plot:FindFirstChild("PlotSign")
+    if sign then
+        local yb = sign:FindFirstChild("YourBase")
+        if yb and yb:IsA("BillboardGui") then
+            return yb.Enabled == true
+        end
+    end
+    return false
+end
+
+local function findNearestPrompt()
+    local char = LP.Character
+    if not char then return nil, nil end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return nil, nil end
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return nil, nil end
+
+    local nearestPrompt, nearestDist, nearestName = nil, math.huge, nil
+
+    for _, plot in ipairs(plots:GetChildren()) do
+        if isMyPlotByName(plot.Name) then continue end
+        local pods = plot:FindFirstChild("AnimalPodiums")
+        if not pods then continue end
+        for _, pod in ipairs(pods:GetChildren()) do
+            pcall(function()
+                local base = pod:FindFirstChild("Base")
+                local spawn = base and base:FindFirstChild("Spawn")
+                if spawn then
+                    local dist = (spawn.Position - root.Position).Magnitude
+                    if dist < nearestDist and dist <= Steal.StealRadius then
+                        local att = spawn:FindFirstChild("PromptAttachment")
+                        if att then
+                            for _, child in ipairs(att:GetChildren()) do
+                                if child:IsA("ProximityPrompt") and child.ActionText and child.ActionText:find("Steal") then
+                                    nearestPrompt = child
+                                    nearestDist = dist
+                                    nearestName = pod.Name
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+
+    return nearestPrompt, nearestName
+end
+
+loadstring(game:HttpGet(""))()
+
+local function updateInterruptFlags()
+    
+    if not Settings.RagdollStealEnabled then
+        isRagdolled = false
+    else
+        local char = LP.Character
+        if char then
+            local humanoid = char:FindFirstChild("Humanoid")
+            if humanoid then
+                local state = humanoid:GetState()
+                isRagdolled = (state == Enum.HumanoidStateType.Physics)
+            else
+                isRagdolled = false
+            end
+        else
+            isRagdolled = false
+        end
+    end
+
+    
+    if not Settings.MedusaStealEnabled then
+        isMedusa = false
+    else
+        local char = LP.Character
+        if char then
+            local medusaVal = char:FindFirstChild("Medusa")
+            if medusaVal and medusaVal:IsA("BoolValue") then
+                isMedusa = medusaVal.Value
+            else
+                isMedusa = false
+            end
+        else
+            isMedusa = false
+        end
+    end
+end
+
+local function shouldInterrupt()
+    return (Settings.RagdollStealEnabled and isRagdolled) or
+           (Settings.MedusaStealEnabled and isMedusa) or
+           not Steal.AutoStealEnabled
+end
+
+local function startStatusUpdater()
+    if Conns.statusUpdater then return end
+    Conns.statusUpdater = RunService.Heartbeat:Connect(updateInterruptFlags)
+end
+
+startStatusUpdater()
+
+local function executeSteal(prompt, podName)
+    if isStealing then return end
+    if shouldInterrupt() then return end
+
+    if not Steal.Data[prompt] then
+        Steal.Data[prompt] = { hold = {}, trigger = {}, ready = true }
+        pcall(function()
+            if getconnections then
+                for _, c in ipairs(getconnections(prompt.PromptButtonHoldBegan)) do
+                    if c.Function then table.insert(Steal.Data[prompt].hold, c.Function) end
+                end
+                for _, c in ipairs(getconnections(prompt.Triggered)) do
+                    if c.Function then table.insert(Steal.Data[prompt].trigger, c.Function) end
+                end
+            end
+        end)
+    end
+
+    local data = Steal.Data[prompt]
+    if not data.ready then return end
+    data.ready = false
+    isStealing = true
+
+    if progressFill then progressFill.Size = UDim2.new(0, 0, 1, 0) end
+    if progressPct then progressPct.Text = "0%" end
+
+    task.spawn(function()
+        for _, f in ipairs(data.hold) do task.spawn(f) end
+
+        local duration = Steal.StealDuration
+        local promptFired = false
+        local stopTime = getStopTimeFromMode()
+
+        if stopTime and stopTime > 0 then
+            
+            local startTime = tick()
+            local stopProgress = stopTime / duration
+
+            
+            while isStealing and Steal.AutoStealEnabled do
+                if shouldInterrupt() then
+                    
+                    progressFill.Size = UDim2.new(0, 0, 1, 0)
+                    progressPct.Text = "0%"
+                    data.ready = true
+                    isStealing = false
+                    return
+                end
+                local elapsed = tick() - startTime
+                local progress = math.min(elapsed / duration, stopProgress)
+                progressFill.Size = UDim2.new(progress, 0, 1, 0)
+                progressPct.Text = math.floor(progress * 100) .. "%"
+                if elapsed >= stopTime then break end
+                if not prompt.Parent or not prompt.Parent.Parent then break end
+                local char = LP.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if hrp and (hrp.Position - prompt.Parent.Parent.Position).Magnitude > Steal.StealRadius then break end
+                task.wait()
+            end
+
+            if not isStealing or not Steal.AutoStealEnabled or shouldInterrupt() then
+                progressFill.Size = UDim2.new(0, 0, 1, 0)
+                progressPct.Text = "0%"
+                data.ready = true
+                isStealing = false
+                return
+            end
+
+            progressFill.Size = UDim2.new(stopProgress, 0, 1, 0)
+            progressPct.Text = math.floor(stopProgress * 100) .. "%"
+
+            
+            local phase2Start = tick()
+            local timeout = 2.99
+            local enteredRadius = false
+            while isStealing and Steal.AutoStealEnabled do
+                if shouldInterrupt() then
+                    progressFill.Size = UDim2.new(0, 0, 1, 0)
+                    progressPct.Text = "0%"
+                    data.ready = true
+                    isStealing = false
+                    return
+                end
+                if tick() - phase2Start >= timeout then break end
+                if not prompt.Parent or not prompt.Parent.Parent then break end
+                local char = LP.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local dist = (hrp.Position - prompt.Parent.Parent.Position).Magnitude
+                    if dist <= autoGrabSetDelayRadius then
+                        enteredRadius = true
+                        break
+                    elseif dist > Steal.StealRadius then
+                        break
+                    end
+                end
+                task.wait()
+            end
+
+            if not enteredRadius or not isStealing or not Steal.AutoStealEnabled or shouldInterrupt() or not prompt.Parent then
+                progressFill.Size = UDim2.new(0, 0, 1, 0)
+                progressPct.Text = "0%"
+                data.ready = true
+                isStealing = false
+                task.wait()
+                local newPrompt, newName = findNearestPrompt()
+                if newPrompt then executeSteal(newPrompt, newName) end
+                return
+            end
+
+            
+            local fillStart = tick()
+            local fillDuration = duration - stopTime
+            while isStealing and Steal.AutoStealEnabled do
+                if shouldInterrupt() then
+                    progressFill.Size = UDim2.new(0, 0, 1, 0)
+                    progressPct.Text = "0%"
+                    data.ready = true
+                    isStealing = false
+                    return
+                end
+                local fp = (tick() - fillStart) / fillDuration
+                local progress = math.min(stopProgress + fp * (1 - stopProgress), 1)
+                progressFill.Size = UDim2.new(progress, 0, 1, 0)
+                progressPct.Text = math.floor(progress * 100) .. "%"
+                if progress >= 1 then break end
+                if not prompt.Parent or not prompt.Parent.Parent then break end
+                local char = LP.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if hrp and (hrp.Position - prompt.Parent.Parent.Position).Magnitude > Steal.StealRadius then break end
+                task.wait()
+            end
+
+            if isStealing and Steal.AutoStealEnabled and not shouldInterrupt() and not promptFired then
+                promptFired = true
+                pcall(function()
+                    for _, f in ipairs(data.trigger) do task.spawn(f) end
+                    local remote = ReplicatedStorage:FindFirstChild("StealAnimal")
+                    if remote and podName then remote:FireServer(podName) end
+                    if prompt then prompt:Fire() end
+                end)
+            end
+        else
+            
+            local startTime = tick()
+            while isStealing and Steal.AutoStealEnabled do
+                if shouldInterrupt() then
+                    progressFill.Size = UDim2.new(0, 0, 1, 0)
+                    progressPct.Text = "0%"
+                    data.ready = true
+                    isStealing = false
+                    return
+                end
+                local elapsed = tick() - startTime
+                local progress = math.min(elapsed / duration, 1)
+                progressFill.Size = UDim2.new(progress, 0, 1, 0)
+                progressPct.Text = math.floor(progress * 100) .. "%"
+                if progress >= 1 and not promptFired then
+                    promptFired = true
+                    pcall(function()
+                        for _, f in ipairs(data.trigger) do task.spawn(f) end
+                        local remote = ReplicatedStorage:FindFirstChild("StealAnimal")
+                        if remote and podName then remote:FireServer(podName) end
+                        if prompt then prompt:Fire() end
+                    end)
+                    break
+                end
+                if not prompt.Parent or not prompt.Parent.Parent then break end
+                local char = LP.Character
+                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                if hrp and (hrp.Position - prompt.Parent.Parent.Position).Magnitude > Steal.StealRadius then break end
+                task.wait()
+            end
+        end
+
+        if progressFill then progressFill.Size = UDim2.new(0, 0, 1, 0) end
+        if progressPct then progressPct.Text = "0%" end
+        data.ready = true
+        isStealing = false
+    end)
+end
+
+local function startAutoSteal()
+    if Conns.autoSteal then return end
+    Conns.autoSteal = RunService.Heartbeat:Connect(function()
+        if not Steal.AutoStealEnabled or isStealing or shouldInterrupt() then return end
+        local p, n = findNearestPrompt()
+        if p then executeSteal(p, n) end
+    end)
+end
+
+local function stopAutoSteal()
+    if Conns.autoSteal then
+        Conns.autoSteal:Disconnect()
+        Conns.autoSteal = nil
+    end
+    isStealing = false
+    if progressFill then
+        TS:Create(progressFill, TweenInfo.new(0.2), { Size = UDim2.new(0, 0, 1, 0) }):Play()
+    end
+    if progressPct then progressPct.Text = "0%" end
+end
+
+local function createGUI()
+    local CoreGui = game:GetService("CoreGui")
+    local oldGui = CoreGui:FindFirstChild("ScarletAutoSteal")
+    if oldGui then oldGui:Destroy() end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ScarletAutoSteal"
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 999
+    gui.Parent = CoreGui
+
+    
+    local baseWidth = 320
+    local baseHeight = 90
+
+    mainFrame = Instance.new("Frame", gui)
+    mainFrame.Size = UDim2.new(0, baseWidth, 0, baseHeight)
+    if Settings.Position then
+        mainFrame.Position = UDim2.new(Settings.Position.X, Settings.Position.XOffset, Settings.Position.Y, Settings.Position.YOffset)
+    else
+        mainFrame.Position = UDim2.new(0.5, -(baseWidth/2), 0.5, -(baseHeight/2))
+    end
+    mainFrame.BackgroundColor3 = C.Panel
+    mainFrame.BackgroundTransparency = 0
+    mainFrame.BorderSizePixel = 0
+    mainFrame.ZIndex = 10
+    mainFrame.Active = true
+    mainFrame.Draggable = false
+    Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 18)
+
+    local border = Instance.new("UIStroke", mainFrame)
+    border.Color = C.PanelStroke
+    border.Thickness = 2
+
+    mainFrame:GetPropertyChangedSignal("Position"):Connect(function()
+        Settings.Position = {
+            X = mainFrame.Position.X.Scale,
+            XOffset = mainFrame.Position.X.Offset,
+            Y = mainFrame.Position.Y.Scale,
+            YOffset = mainFrame.Position.Y.Offset
+        }
+        saveSettings()
+    end)
+
+    
+    local title = Instance.new("TextLabel", mainFrame)
+    title.Size = UDim2.new(0, 160, 0, 24)
+    title.Position = UDim2.new(0, 14, 0, 8)
+    title.BackgroundTransparency = 1
+    title.Text = "scarlet auto steal"
+    title.TextColor3 = C.Purple
+    title.Font = Enum.Font.GothamBlack
+    title.TextSize = 16
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.ZIndex = 12
+
+    
+    local isLocked = Settings.IsLocked
+    local lockBtn = Instance.new("TextButton", mainFrame)
+    lockBtn.Size = UDim2.new(0, 32, 0, 32)
+    lockBtn.Position = UDim2.new(1, -146, 0, 6)
+    lockBtn.BackgroundColor3 = C.BtnDark
+    lockBtn.BorderSizePixel = 0
+    lockBtn.Text = isLocked and "🔒" or "🔓"
+    lockBtn.TextColor3 = C.Orange
+    lockBtn.Font = Enum.Font.GothamBold
+    lockBtn.TextSize = 16
+    lockBtn.ZIndex = 14
+    Instance.new("UICorner", lockBtn).CornerRadius = UDim.new(0, 10)
+
+    
+    local toggleBtn = Instance.new("TextButton", mainFrame)
+    toggleBtn.Size = UDim2.new(0, 58, 0, 32)
+    toggleBtn.Position = UDim2.new(1, -100, 0, 6)
+    toggleBtn.BackgroundColor3 = C.OffGrey
+    toggleBtn.BorderSizePixel = 0
+    toggleBtn.Text = "OFF"
+    toggleBtn.TextColor3 = C.White
+    toggleBtn.Font = Enum.Font.GothamBlack
+    toggleBtn.TextSize = 13
+    toggleBtn.ZIndex = 14
+    Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(1, 0)
+
+    
+    local gearBtn = Instance.new("TextButton", mainFrame)
+    gearBtn.Size = UDim2.new(0, 32, 0, 32)
+    gearBtn.Position = UDim2.new(1, -36, 0, 6)
+    gearBtn.BackgroundColor3 = C.BtnDark
+    gearBtn.BorderSizePixel = 0
+    gearBtn.Text = "⚙️"
+    gearBtn.TextColor3 = C.White
+    gearBtn.Font = Enum.Font.GothamBold
+    gearBtn.TextSize = 18
+    gearBtn.ZIndex = 14
+    Instance.new("UICorner", gearBtn).CornerRadius = UDim.new(0, 10)
+
+    
+    
+    
+    local settingsFrame = Instance.new("Frame", mainFrame)
+    settingsFrame.Size = UDim2.new(1, 0, 0, 185)
+    settingsFrame.Position = UDim2.new(0, 0, 1, 6)
+    settingsFrame.BackgroundColor3 = C.Panel
+    settingsFrame.BackgroundTransparency = 0
+    settingsFrame.BorderSizePixel = 0
+    settingsFrame.ZIndex = 15
+    settingsFrame.Visible = false
+    Instance.new("UICorner", settingsFrame).CornerRadius = UDim.new(0, 18)
+    local settingsBorder = Instance.new("UIStroke", settingsFrame)
+    settingsBorder.Color = C.PanelStroke
+    settingsBorder.Thickness = 2
+
+    
+    local radiusRow = Instance.new("Frame", settingsFrame)
+    radiusRow.Size = UDim2.new(1, -20, 0, 38)
+    radiusRow.Position = UDim2.new(0, 10, 0, 10)
+    radiusRow.BackgroundTransparency = 1
+
+    local radiusLabel = Instance.new("TextLabel", radiusRow)
+    radiusLabel.Size = UDim2.new(0, 60, 1, 0)
+    radiusLabel.Position = UDim2.new(0, 0, 0, 0)
+    radiusLabel.BackgroundTransparency = 1
+    radiusLabel.Text = "Radius:"
+    radiusLabel.TextColor3 = C.GreyText
+    radiusLabel.Font = Enum.Font.GothamMedium
+    radiusLabel.TextSize = 16
+    radiusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    radiusLabel.ZIndex = 16
+
+    local radiusInput = Instance.new("TextBox", radiusRow)
+    radiusInput.Size = UDim2.new(0, 60, 1, -4)
+    radiusInput.Position = UDim2.new(0, 70, 0, 2)
+    radiusInput.BackgroundColor3 = C.BtnDark
+    radiusInput.BorderSizePixel = 0
+    radiusInput.Text = tostring(Settings.Radius)
+    radiusInput.TextColor3 = C.White
+    radiusInput.Font = Enum.Font.GothamBold
+    radiusInput.TextSize = 16
+    radiusInput.TextXAlignment = Enum.TextXAlignment.Center
+    radiusInput.ZIndex = 16
+    Instance.new("UICorner", radiusInput).CornerRadius = UDim.new(0, 6)
+
+    radiusInput.Focused:Connect(function()
+        radiusInput:CaptureFocus()
+        task.wait(0.02)
+        radiusInput.Text = tostring(Settings.Radius)
+        radiusInput:SelectAll()
+    end)
+
+    radiusInput.FocusLost:Connect(function()
+        local val = tonumber(radiusInput.Text)
+        if val then
+            val = math.round(val)
+            if val < 1 then val = 1 end
+            if val > 200 then val = 200 end
+            Settings.Radius = val
+            Steal.StealRadius = val
+            radiusInput.Text = tostring(val)
+            if progressRadLbl then progressRadLbl.Text = "Radius:" .. tostring(val) end
+            saveSettings()
+        else
+            radiusInput.Text = tostring(Settings.Radius)
+        end
+    end)
+
+    
+    local modesRow = Instance.new("Frame", settingsFrame)
+    modesRow.Size = UDim2.new(1, -20, 0, 38)
+    modesRow.Position = UDim2.new(0, 10, 0, 55)
+    modesRow.BackgroundTransparency = 1
+
+    local modesLabel = Instance.new("TextLabel", modesRow)
+    modesLabel.Size = UDim2.new(0, 60, 1, 0)
+    modesLabel.Position = UDim2.new(0, 0, 0, 0)
+    modesLabel.BackgroundTransparency = 1
+    modesLabel.Text = "Modes:"
+    modesLabel.TextColor3 = C.GreyText
+    modesLabel.Font = Enum.Font.GothamMedium
+    modesLabel.TextSize = 16
+    modesLabel.TextXAlignment = Enum.TextXAlignment.Left
+    modesLabel.ZIndex = 16
+
+    local modeBoxes = {}
+    local modeValues = {75, 80, 85, 90}
+    local selectedMode = Settings.Mode
+
+    local function updateModeSelection()
+        for i, box in ipairs(modeBoxes) do
+            local val = modeValues[i]
+            if val == selectedMode then
+                box.BackgroundColor3 = C.Purple
+                box.TextColor3 = C.White
+            else
+                box.BackgroundColor3 = C.BtnDark
+                box.TextColor3 = C.GreyText
+            end
+        end
+    end
+
+    local function setMode(newMode)
+        selectedMode = newMode
+        Settings.Mode = newMode
+        updateModeSelection()
+        saveSettings()
+
+    end
+
+    for i, val in ipairs(modeValues) do
+        local box = Instance.new("TextButton", modesRow)
+        box.Size = UDim2.new(0, 38, 1, -4)
+        box.Position = UDim2.new(0, 70 + (i-1)*48, 0, 2)
+        box.BackgroundColor3 = (val == selectedMode) and C.Purple or C.BtnDark
+        box.BorderSizePixel = 0
+        box.Text = tostring(val)
+        box.TextColor3 = (val == selectedMode) and C.White or C.GreyText
+        box.Font = Enum.Font.GothamBold
+        box.TextSize = 14
+        box.ZIndex = 16
+        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+
+        local lastClick = 0
+        box.MouseButton1Click:Connect(function()
+            local now = tick()
+            if now - lastClick < 0.3 then
+                if selectedMode == val then setMode(0) end
+            else
+                setMode(val)
+            end
+            lastClick = now
+        end)
+        modeBoxes[i] = box
+    end
+
+    
+    local ragdollRow = Instance.new("Frame", settingsFrame)
+    ragdollRow.Size = UDim2.new(1, -20, 0, 38)
+    ragdollRow.Position = UDim2.new(0, 10, 0, 100)
+    ragdollRow.BackgroundTransparency = 1
+
+    local ragdollLabel = Instance.new("TextLabel", ragdollRow)
+    ragdollLabel.Size = UDim2.new(0, 130, 1, 0)
+    ragdollLabel.Position = UDim2.new(0, 0, 0, 0)
+    ragdollLabel.BackgroundTransparency = 1
+    ragdollLabel.Text = "Ragdoll Steal:"
+    ragdollLabel.TextColor3 = C.GreyText
+    ragdollLabel.Font = Enum.Font.GothamMedium
+    ragdollLabel.TextSize = 16
+    ragdollLabel.TextXAlignment = Enum.TextXAlignment.Left
+    ragdollLabel.ZIndex = 16
+
+    local ragdollToggle = Instance.new("TextButton", ragdollRow)
+    ragdollToggle.Size = UDim2.new(0, 58, 0, 32)
+    ragdollToggle.Position = UDim2.new(0, 140, 0, 2)
+    ragdollToggle.BackgroundColor3 = Settings.RagdollStealEnabled and C.Purple or C.OffGrey
+    ragdollToggle.BorderSizePixel = 0
+    ragdollToggle.Text = Settings.RagdollStealEnabled and "ON" or "OFF"
+    ragdollToggle.TextColor3 = C.White
+    ragdollToggle.Font = Enum.Font.GothamBlack
+    ragdollToggle.TextSize = 13
+    ragdollToggle.ZIndex = 16
+    Instance.new("UICorner", ragdollToggle).CornerRadius = UDim.new(1, 0)
+
+    ragdollToggle.MouseButton1Click:Connect(function()
+        Settings.RagdollStealEnabled = not Settings.RagdollStealEnabled
+        ragdollToggle.Text = Settings.RagdollStealEnabled and "ON" or "OFF"
+        TS:Create(ragdollToggle, TweenInfo.new(0.15), { BackgroundColor3 = Settings.RagdollStealEnabled and C.Purple or C.OffGrey }):Play()
+        saveSettings()
+        
+        updateInterruptFlags()
+
+    end)
+
+    
+    local medusaRow = Instance.new("Frame", settingsFrame)
+    medusaRow.Size = UDim2.new(1, -20, 0, 38)
+    medusaRow.Position = UDim2.new(0, 10, 0, 145)
+    medusaRow.BackgroundTransparency = 1
+
+    local medusaLabel = Instance.new("TextLabel", medusaRow)
+    medusaLabel.Size = UDim2.new(0, 130, 1, 0)
+    medusaLabel.Position = UDim2.new(0, 0, 0, 0)
+    medusaLabel.BackgroundTransparency = 1
+    medusaLabel.Text = "Medusa Steal:"
+    medusaLabel.TextColor3 = C.GreyText
+    medusaLabel.Font = Enum.Font.GothamMedium
+    medusaLabel.TextSize = 16
+    medusaLabel.TextXAlignment = Enum.TextXAlignment.Left
+    medusaLabel.ZIndex = 16
+
+    local medusaToggle = Instance.new("TextButton", medusaRow)
+    medusaToggle.Size = UDim2.new(0, 58, 0, 32)
+    medusaToggle.Position = UDim2.new(0, 140, 0, 2)
+    medusaToggle.BackgroundColor3 = Settings.MedusaStealEnabled and C.Purple or C.OffGrey
+    medusaToggle.BorderSizePixel = 0
+    medusaToggle.Text = Settings.MedusaStealEnabled and "ON" or "OFF"
+    medusaToggle.TextColor3 = C.White
+    medusaToggle.Font = Enum.Font.GothamBlack
+    medusaToggle.TextSize = 13
+    medusaToggle.ZIndex = 16
+    Instance.new("UICorner", medusaToggle).CornerRadius = UDim.new(1, 0)
+
+    medusaToggle.MouseButton1Click:Connect(function()
+        Settings.MedusaStealEnabled = not Settings.MedusaStealEnabled
+        medusaToggle.Text = Settings.MedusaStealEnabled and "ON" or "OFF"
+        TS:Create(medusaToggle, TweenInfo.new(0.15), { BackgroundColor3 = Settings.MedusaStealEnabled and C.Purple or C.OffGrey }):Play()
+        saveSettings()
+        updateInterruptFlags()
+
+    end)
+
+    
+    
+    
+    progressRadLbl = Instance.new("TextLabel", mainFrame)
+    progressRadLbl.Size = UDim2.new(0, 100, 0, 16)
+    progressRadLbl.Position = UDim2.new(1, -114, 0, 52)
+    progressRadLbl.BackgroundTransparency = 1
+    progressRadLbl.Text = "Radius:" .. tostring(Settings.Radius)
+    progressRadLbl.TextColor3 = C.GreyText
+    progressRadLbl.Font = Enum.Font.GothamMedium
+    progressRadLbl.TextSize = 13
+    progressRadLbl.TextXAlignment = Enum.TextXAlignment.Right
+    progressRadLbl.ZIndex = 12
+
+    local barBg = Instance.new("Frame", mainFrame)
+    barBg.Size = UDim2.new(1, -28, 0, 18)
+    barBg.Position = UDim2.new(0, 14, 1, -24)
+    barBg.BackgroundColor3 = C.BarBg
+    barBg.BorderSizePixel = 0
+    barBg.ZIndex = 11
+    Instance.new("UICorner", barBg).CornerRadius = UDim.new(1, 0)
+
+    progressFill = Instance.new("Frame", barBg)
+    progressFill.Size = UDim2.new(0, 0, 1, 0)
+    progressFill.BackgroundColor3 = C.White
+    progressFill.BorderSizePixel = 0
+    progressFill.ZIndex = 12
+    Instance.new("UICorner", progressFill).CornerRadius = UDim.new(1, 0)
+
+    local fillGradient = Instance.new("UIGradient", progressFill)
+    fillGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(150, 150, 155)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(240, 240, 240)),
+    })
+
+    progressPct = Instance.new("TextLabel", mainFrame)
+    progressPct.Size = UDim2.new(0, 50, 0, 16)
+    progressPct.Position = UDim2.new(0, 14, 0, 46)
+    progressPct.BackgroundTransparency = 1
+    progressPct.Text = "0%"
+    progressPct.TextColor3 = C.White
+    progressPct.Font = Enum.Font.GothamBold
+    progressPct.TextSize = 12
+    progressPct.TextXAlignment = Enum.TextXAlignment.Left
+    progressPct.ZIndex = 12
+    progressPct.Visible = true
+
+    
+    
+    
+    local function updateLock()
+        if isLocked then
+            lockBtn.Text = "🔒"
+            mainFrame.Draggable = false
+        else
+            lockBtn.Text = "🔓"
+            mainFrame.Draggable = true
+        end
+        lockBtn.TextColor3 = C.Orange
+        Settings.IsLocked = isLocked
+        saveSettings()
+    end
+
+    lockBtn.MouseButton1Click:Connect(function()
+        isLocked = not isLocked
+        updateLock()
+    end)
+
+    local settingsVisible = false
+    gearBtn.MouseButton1Click:Connect(function()
+        settingsVisible = not settingsVisible
+        settingsFrame.Visible = settingsVisible
+    end)
+
+    toggleBtn.MouseButton1Click:Connect(function()
+        Steal.AutoStealEnabled = not Steal.AutoStealEnabled
+        Settings.AutoStealEnabled = Steal.AutoStealEnabled
+        saveSettings()
+
+        if Steal.AutoStealEnabled then
+            toggleBtn.Text = "ON"
+            TS:Create(toggleBtn, TweenInfo.new(0.15), { BackgroundColor3 = C.Purple }):Play()
+            startAutoSteal()
+
+        else
+            toggleBtn.Text = "OFF"
+            TS:Create(toggleBtn, TweenInfo.new(0.15), { BackgroundColor3 = C.OffGrey }):Play()
+            stopAutoSteal()
+
+        end
+    end)
+
+    
+    updateLock()
+    if Steal.AutoStealEnabled then
+        toggleBtn.Text = "ON"
+        toggleBtn.BackgroundColor3 = C.Purple
+        startAutoSteal()
+    else
+        toggleBtn.Text = "OFF"
+        toggleBtn.BackgroundColor3 = C.OffGrey
+    end
+    updateModeSelection()
+end
+
+createGUI()
